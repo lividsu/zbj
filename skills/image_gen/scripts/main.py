@@ -1,5 +1,34 @@
 from llm.humanized_responses import designer, response_builder
 
+
+def _enhance_prompt(processor, message: str) -> str:
+    """用设计师视角丰富用户的生成提示词，使图片效果更专业。"""
+    if not message or len(message.strip()) < 5:
+        return message
+    enhance_prompt = f"""你是一名资深平面设计师兼 AI 绘图专家。用户想生成一张图片，原始描述如下：
+
+"{message}"
+
+请基于原始描述，输出一段更详细、更专业的英文图片生成提示词（prompt）。要求：
+- 保留原意，不改变主题
+- 补充构图方式（如 center composition、rule of thirds）
+- 补充色彩风格（如 warm tones、vibrant colors、muted palette）
+- 补充光线与氛围（如 soft natural light、cinematic lighting）
+- 补充风格标签（如 flat design、illustration、photorealistic、minimalist）
+- 结尾加上质量标签：high quality, detailed, 4K
+
+只输出优化后的英文 prompt，不要任何解释或前缀。"""
+    try:
+        enhanced = processor.chat_handler.get_ai_response(enhance_prompt, temperature=0.4)
+        enhanced = enhanced.strip().strip('"').strip("'")
+        if enhanced and len(enhanced) > 10:
+            print(f"✨ Prompt 增强: {enhanced[:120]}...")
+            return enhanced
+    except Exception:
+        pass
+    return message
+
+
 def execute(message: str, chat_id: str, processor, **kwargs) -> dict:
     """
     Execute the image generation/editing skill.
@@ -12,16 +41,18 @@ def execute(message: str, chat_id: str, processor, **kwargs) -> dict:
     original_prompt = kwargs.get("original_prompt", message)
 
     result = {
-        "text": "", 
+        "text": "",
         "image_path": None,
         "needs_reflection": False,
         "reflection_context": None
     }
 
     if not has_images:
+        # Enhance prompt with designer expertise before generation
+        enhanced_message = _enhance_prompt(processor, message)
         # Text to Image
         text_response, image_bytes = processor.chat_handler.generate_image(
-            message, 
+            enhanced_message,
             use_pro=use_pro
         )
         
