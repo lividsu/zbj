@@ -7,6 +7,7 @@ import shutil
 import importlib.util
 import sys
 from pathlib import Path
+from typing import Any
 
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
@@ -24,6 +25,7 @@ class SkillsLoader:
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
+        self._metadata_cache: dict[str, dict[str, Any] | None] = {}
 
     def list_skills(self, filter_unavailable: bool = True, filter_unexecutable: bool = True) -> list[dict[str, str]]:
         """
@@ -170,7 +172,7 @@ class SkillsLoader:
         meta = self.get_skill_metadata(name)
         if meta and meta.get("description"):
             return meta["description"]
-        return name  # Fallback to skill name
+        return name
 
     def _strip_frontmatter(self, content: str) -> str:
         """Remove YAML frontmatter from markdown content."""
@@ -224,15 +226,9 @@ class SkillsLoader:
         Returns:
             The loaded module or None if not found.
         """
-        # Check workspace first
-        workspace_main = self.workspace_skills / name / "scripts" / "main.py"
-        module_path = workspace_main if workspace_main.exists() else None
-
-        # Check built-in if not in workspace
-        if not module_path and self.builtin_skills:
-            builtin_main = self.builtin_skills / name / "scripts" / "main.py"
-            if builtin_main.exists():
-                module_path = builtin_main
+        module_path = self._get_skill_root(name) / "scripts" / "main.py"
+        if not module_path.exists():
+            module_path = None
 
         if not module_path:
             return None
@@ -273,19 +269,88 @@ class SkillsLoader:
         Returns:
             Metadata dict or None.
         """
+        if name in self._metadata_cache:
+            return self._metadata_cache[name]
         content = self.load_skill(name)
         if not content:
+            self._metadata_cache[name] = None
             return None
+        metadata = self._extract_frontmatter(content)
+        self._metadata_cache[name] = metadata
+        return metadata
 
-        if content.startswith("---"):
-            match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-            if match:
-                # Simple YAML parsing
-                metadata = {}
-                for line in match.group(1).split("\n"):
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        metadata[key.strip()] = value.strip().strip('"\'')
-                return metadata
+    def validate_skills(self) -> dict[str, list[dict[str, str]]]:
+        report = {"errors": [], "warnings": []}
+        all_skills = self.list_skills(filter_unavailable=False, filter_unexecutable=False)
+        for skill in all_skills:
+            name = skill["name"]
+            metadata = self.get_skill_metadata(name) or {}
+            if not metadata:
+                report["errors"].append({"skill": name, "reason": "SKILL.md 缺少 frontmatter"})
+                continue
+            meta_name = str(metadata.get("name", "")).strip()
+            if not meta_name:
+                report["errors"].append({"skill": name, "reason": "frontmatter 缺少 name"})
+            elif meta_name != name:
+                report["errors"].append({"skill": name, "reason": f"name 与目录名不一致: {meta_name}"})
+            if not str(metadata.get("description", "")).strip():
+                report["warnings"].append({"skill": name, "reason": "frontmatter 缺少 description"})
+            if not self._has_executable_entry(name):
+                report["errors"].append({"skill": name, "reason": "缺少 scripts/main.py"})
+            skill_meta = self._get_skill_meta(name)
+            if not self._check_requirements(skill_meta):
+                missing = self._get_missing_requirements(skill_meta)
+                report["warnings"].append({"skill": name, "reason": f"依赖未满足: {missing}"})
+        return report
 
-        return None
+    def _extract_frontmatter(self, content: str) -> dict[str, Any] | None:
+        if not content.startswith("---"):
+            return None
+        match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+        if not match:
+            return None
+        return self._parse_frontmatter_lines(match.group(1).split("\n"))
+
+    def _parse_frontmatter_lines(self, lines: list[str]) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+        current_key: str | None = None
+        for raw in lines:
+            line = raw.rstrip()
+            if not line.strip():
+                continue
+            if line.lstrip().startswith("#"):
+                continue
+            if line.startswith("  - ") and current_key:
+                current = metadata.get(current_key)
+                if not isinstance(current, list):
+                    current = [] if current in (None, "") else [current]
+                current.append(line[4:].strip().strip('"\''))
+                metadata[current_key] = current
+                continue
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+            current_key = key
+            if value == "":
+                metadata[key] = []
+                continue
+            parsed_value: Any = value.strip('"\'')
+            lowered = str(parsed_value).lower()
+            if lowered == "true":
+                parsed_value = True
+            elif lowered == "false":
+                parsed_value = False
+            metadata[key] = parsed_value
+        return metadata
+
+    def _get_skill_root(self, name: str) -> Path:
+        workspace_root = self.workspace_skills / name
+        if workspace_root.exists():
+            return workspace_root
+        if self.builtin_skills:
+            builtin_root = self.builtin_skills / name
+            if builtin_root.exists():
+                return builtin_root
+        return workspace_root

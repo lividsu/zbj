@@ -1,11 +1,13 @@
 # message_processor.py
-from typing import Optional, Tuple, List, Union
+from typing import Tuple, List, Union, Any
 import os
 import time
+import json
+import re
 from pathlib import Path
 from .chat_client import ChatHandler
-from .humanized_responses import designer, response_builder
 from core.skills_loader import SkillsLoader
+from core.tools import ToolRegistry, ExecuteSkillTool
 
 class MessageProcessor:
     def __init__(self):
@@ -32,6 +34,12 @@ class MessageProcessor:
         # Skills Loader
         workspace_dir = Path(os.getcwd())
         self.skills_loader = SkillsLoader(workspace=workspace_dir)
+        self.skill_validation_report = self.skills_loader.validate_skills()
+        if self.skill_validation_report["errors"]:
+            print(f"⚠️ Skills 校验错误: {self.skill_validation_report['errors']}")
+        if self.skill_validation_report["warnings"]:
+            print(f"ℹ️ Skills 校验警告: {self.skill_validation_report['warnings']}")
+        self.max_tool_iterations = int(os.getenv("AGENT_MAX_TOOL_ITERATIONS", "3"))
 
     def _check_pro_mode(self, message: str) -> Tuple[bool, str]:
         """
@@ -47,8 +55,6 @@ class MessageProcessor:
         for keyword in self.pro_keywords:
             if keyword in msg_lower:
                 use_pro = True
-                # 从消息中移除 pro 关键词，避免影响生成
-                import re
                 clean_message = re.sub(re.escape(keyword), '', clean_message, flags=re.IGNORECASE).strip()
                 break
         
@@ -194,15 +200,14 @@ class MessageProcessor:
         if use_pro:
             print(f"🚀 Pro模式启动")
         
-        message_type = self.determine_skill(clean_message, has_images=False)
-        print(f"📋 消息类型 (Skill): {message_type}")
-        
-        result = self.skills_loader.execute_skill(
-            name=message_type,
+        result = self._run_tool_loop(
             message=clean_message,
             chat_id=chat_id,
-            processor=self,
             has_images=False,
+            image_paths=None,
+            has_files=False,
+            file_paths=None,
+            file_exts=None,
             use_pro=use_pro,
             current_attempt=current_attempt,
             original_prompt=original_prompt
@@ -255,16 +260,14 @@ class MessageProcessor:
             print(f"🚀 Pro模式启动")
         
         effective_message = clean_message.strip() if clean_message else ""
-        message_type = self.determine_skill(effective_message, has_images=True, num_images=num_images)
-        print(f"📋 消息类型 (Skill): {message_type}, 图片数量: {num_images}")
-        
-        result = self.skills_loader.execute_skill(
-            name=message_type,
+        result = self._run_tool_loop(
             message=effective_message,
             chat_id=chat_id,
-            processor=self,
             has_images=True,
             image_paths=image_paths,
+            has_files=False,
+            file_paths=None,
+            file_exts=None,
             use_pro=use_pro,
             current_attempt=current_attempt,
             original_prompt=original_prompt
@@ -297,22 +300,17 @@ class MessageProcessor:
         normalized_message = (message or "").strip()
         file_exts = sorted({Path(p).suffix.lower() for p in file_paths if p})
 
-        message_type = self.determine_skill(
-            normalized_message,
-            has_files=True,
-            num_files=num_files,
-            file_exts=file_exts
-        )
-        print(f"📋 消息类型 (Skill): {message_type}, 文件数量: {num_files}")
-
-        result = self.skills_loader.execute_skill(
-            name=message_type,
+        result = self._run_tool_loop(
             message=normalized_message,
             chat_id=chat_id,
-            processor=self,
+            has_images=False,
+            image_paths=None,
             has_files=True,
             file_paths=file_paths,
-            file_exts=file_exts
+            file_exts=file_exts,
+            use_pro=False,
+            current_attempt=0,
+            original_prompt=normalized_message
         )
 
         file_count_hint = f"[{num_files}个文件]"
@@ -338,3 +336,168 @@ class MessageProcessor:
         
         if len(self.conversation_history[chat_id]) > 10:
             self.conversation_history[chat_id] = self.conversation_history[chat_id][-10:]
+
+    def _normalize_result(self, result: dict | None) -> dict:
+        base = {
+            "text": "",
+            "image_path": None,
+            "file_path": None,
+            "pdf_path": None,
+            "needs_reflection": False,
+            "reflection_context": None,
+            "tool_trace": []
+        }
+        if not isinstance(result, dict):
+            return base
+        base.update(result)
+        return base
+
+    def _extract_json_object(self, raw: str) -> dict[str, Any]:
+        text = (raw or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text)
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            match = re.search(r"\{[\s\S]*\}", text)
+            if not match:
+                return {}
+            try:
+                parsed = json.loads(match.group(0))
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {}
+
+    def _plan_next_action(
+        self,
+        user_message: str,
+        attachment_hint: str,
+        skills_summary: str,
+        tools_summary: str,
+        trace: list[dict[str, Any]],
+        disclosed_skill_context: str
+    ) -> dict[str, Any]:
+        trace_text = json.dumps(trace[-4:], ensure_ascii=False)
+        planning_prompt = f"""你是一个任务编排器。你必须在多轮里决定下一步。
+
+上下文:
+- 用户请求: {user_message}
+- 附件信息: {attachment_hint}
+- 可用工具:
+{tools_summary}
+- Skills 摘要:
+{skills_summary}
+- 已执行轨迹:
+{trace_text}
+
+已披露的 Skill 详情:
+{disclosed_skill_context or "暂无"}
+
+输出必须是 JSON，不要输出其他文字:
+{{
+  "action": "tool" 或 "final",
+  "skill_name": "当 action=tool 时必填",
+  "message": "传给 skill 的消息，可为空",
+  "final_text": "当 action=final 时输出给用户的文本"
+}}
+
+规则:
+1) 只有一个工具 execute_skill。
+2) 优先选择最匹配技能并逐步收敛任务。
+3) 如果已有可直接回复内容，action 用 final。"""
+        response = self.chat_handler.get_ai_response(planning_prompt, temperature=0.2)
+        action = self._extract_json_object(response)
+        return action
+
+    def _run_tool_loop(
+        self,
+        message: str,
+        chat_id: str,
+        has_images: bool,
+        image_paths: List[str] | None,
+        has_files: bool,
+        file_paths: List[str] | None,
+        file_exts: List[str] | None,
+        use_pro: bool,
+        current_attempt: int,
+        original_prompt: str
+    ) -> dict:
+        registry = ToolRegistry()
+        registry.register(ExecuteSkillTool())
+        num_images = len(image_paths or [])
+        num_files = len(file_paths or [])
+        attachment_hint = "纯文本"
+        if has_images:
+            attachment_hint = f"{num_images}张图片"
+        if has_files:
+            attachment_hint = f"{num_files}个文件({','.join(file_exts or [])})"
+        primary_skill = self.determine_skill(
+            message=message,
+            has_images=has_images,
+            num_images=num_images,
+            has_files=has_files,
+            num_files=num_files,
+            file_exts=file_exts
+        )
+        print(f"📋 首选 Skill: {primary_skill}")
+        runtime = {
+            "processor": self,
+            "skills_loader": self.skills_loader,
+            "chat_id": chat_id,
+            "message": message,
+            "has_images": has_images,
+            "image_paths": image_paths,
+            "has_files": has_files,
+            "file_paths": file_paths,
+            "file_exts": file_exts,
+            "use_pro": use_pro,
+            "current_attempt": current_attempt,
+            "original_prompt": original_prompt
+        }
+        trace: list[dict[str, Any]] = []
+        disclosed_skills: set[str] = set()
+        last_result = self._normalize_result({})
+        available_skills = {s["name"] for s in self.skills_loader.list_skills()}
+        for idx in range(self.max_tool_iterations):
+            disclosed_context = self.skills_loader.load_skills_for_context(sorted(disclosed_skills)) if disclosed_skills else ""
+            action = self._plan_next_action(
+                user_message=message,
+                attachment_hint=attachment_hint,
+                skills_summary=self.skills_loader.build_skills_summary(),
+                tools_summary=registry.to_prompt_summary(),
+                trace=trace,
+                disclosed_skill_context=disclosed_context
+            )
+            action_type = str(action.get("action", "tool")).strip().lower()
+            if action_type == "final":
+                final_text = str(action.get("final_text", "")).strip()
+                if final_text:
+                    last_result["text"] = final_text
+                    last_result["tool_trace"] = trace
+                    return last_result
+            skill_name = str(action.get("skill_name", "")).strip() or primary_skill
+            if skill_name not in available_skills:
+                skill_name = primary_skill
+            disclosed_skills.add(skill_name)
+            tool_payload = {
+                "skill_name": skill_name,
+                "message": str(action.get("message", message)),
+                "reason": f"round_{idx + 1}"
+            }
+            print(f"🛠️ 第{idx + 1}轮调用技能: {skill_name}")
+            execution = registry.execute("execute_skill", tool_payload, runtime=runtime)
+            normalized = self._normalize_result(execution.get("result"))
+            preview = (normalized.get("text") or "")[:120]
+            trace.append({"round": idx + 1, "skill": skill_name, "text_preview": preview})
+            normalized["tool_trace"] = trace
+            last_result = normalized
+            if normalized.get("image_path") or normalized.get("file_path") or normalized.get("pdf_path"):
+                return normalized
+            if normalized.get("needs_reflection"):
+                return normalized
+            message = normalized.get("text", "") or message
+            runtime["message"] = message
+            primary_skill = skill_name
+        return last_result
