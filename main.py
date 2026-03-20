@@ -5,6 +5,7 @@ from flask import Flask, jsonify
 
 from config import config
 from core.dependencies import event_manager
+from core.cleanup import cleanup_old_files
 # Import event_handler to register the routes
 import core.event_handler
 
@@ -28,5 +29,6 @@ def callback_event_handler():
     return event_handler(event)
 
 if __name__ == "__main__":
+    cleanup_old_files(config.FILE_RETENTION_DAYS)
     print(f"🚀 Starting Flask app on {config.HOST}:{config.PORT}")
     app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG)

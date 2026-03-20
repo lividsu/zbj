@@ -13,6 +13,7 @@ class Config:
     BOT_NAME = os.getenv("BOT_NAME", "八戒-Dev")
     BOT_OPEN_ID = os.getenv("BOT_OPEN_ID", "")
     MAX_IMAGES = int(os.getenv("MAX_IMAGES", "4"))
+    FILE_RETENTION_DAYS = int(os.getenv("FILE_RETENTION_DAYS", "15"))
     
     HOST = os.getenv("HOST", "0.0.0.0")
     PORT = int(os.getenv("PORT", "3002"))

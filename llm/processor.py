@@ -39,7 +39,7 @@ class MessageProcessor:
             print(f"⚠️ Skills 校验错误: {self.skill_validation_report['errors']}")
         if self.skill_validation_report["warnings"]:
             print(f"ℹ️ Skills 校验警告: {self.skill_validation_report['warnings']}")
-        self.max_tool_iterations = int(os.getenv("AGENT_MAX_TOOL_ITERATIONS", "3"))
+        self.max_tool_iterations = int(os.getenv("AGENT_MAX_TOOL_ITERATIONS", "5"))
 
     def _check_pro_mode(self, message: str) -> Tuple[bool, str]:
         """
@@ -395,18 +395,26 @@ class MessageProcessor:
 已披露的 Skill 详情:
 {disclosed_skill_context or "暂无"}
 
+【决策流程 - 请按以下步骤分析后再输出】:
+第一步: 理解用户的真实意图。用户究竟想要什么结果？
+第二步: 判断信息是否充足。执行所选技能是否有关键必要参数缺失（如：需要知道目标语言、具体尺寸、操作类型等）？这些缺失的参数是否可以从上下文合理推断？
+第三步: 如果信息充足 → 选择最合适的技能执行（action=tool）；如果已有结果可直接回复 → action=final；仅当关键参数缺失且无法合理推断时 → action=clarify 向用户提问。
+
 输出必须是 JSON，不要输出其他文字:
 {{
-  "action": "tool" 或 "final",
-  "skill_name": "当 action=tool 时必填",
+  "action": "tool" 或 "clarify" 或 "final",
+  "skill_name": "当 action=tool 时必填，要执行的技能名称",
   "message": "传给 skill 的消息，可为空",
+  "clarify_text": "当 action=clarify 时必填，向用户提出的具体澄清问题（要友好、具体，如适用则给出选项或示例）",
   "final_text": "当 action=final 时输出给用户的文本"
 }}
 
 规则:
 1) 只有一个工具 execute_skill。
-2) 优先选择最匹配技能并逐步收敛任务。
-3) 如果已有可直接回复内容，action 用 final。"""
+2) 如果用户请求明确，优先选择最匹配技能并执行，不要多余询问。
+3) 仅当关键必要参数缺失且无法合理推断时，才使用 clarify 向用户提问；不要询问可选参数。
+4) 如果已有技能执行结果可直接回复，action 用 final。
+5) clarify_text 必须具体说明需要什么信息，并给出选项或示例（如果适用）。"""
         response = self.chat_handler.get_ai_response(planning_prompt, temperature=0.2)
         action = self._extract_json_object(response)
         return action
@@ -475,6 +483,13 @@ class MessageProcessor:
                 final_text = str(action.get("final_text", "")).strip()
                 if final_text:
                     last_result["text"] = final_text
+                    last_result["tool_trace"] = trace
+                    return last_result
+            if action_type == "clarify":
+                clarify_text = str(action.get("clarify_text", "")).strip()
+                if clarify_text:
+                    print(f"❓ 向用户提问澄清: {clarify_text[:80]}...")
+                    last_result["text"] = clarify_text
                     last_result["tool_trace"] = trace
                     return last_result
             skill_name = str(action.get("skill_name", "")).strip() or primary_skill

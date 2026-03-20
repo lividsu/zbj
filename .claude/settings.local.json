@@ -6,7 +6,11 @@
       "Bash(python -c \":*)",
       "Bash(xargs wc:*)",
       "Bash(git:*)",
-      "Bash(wc -l /c/Users/livid/Documents/GitHub/zbj/**/*.py)"
+      "Bash(wc -l /c/Users/livid/Documents/GitHub/zbj/**/*.py)",
+      "Bash(find /c/Users/livid/Documents/GitHub/zbj -type d -name *upload* -o -type d -name *file* -o -type d -name *agent* -o -type d -name *image* -o -type d -name *temp* -o -type d -name *cache*)",
+      "Bash(ls:*)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(find C:Userslivid.claudeprojects -name *.txt -type f)"
     ]
   }
 }
