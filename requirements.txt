@@ -1,0 +1,9 @@
+Flask==2.0.2
+python-dotenv
+requests
+pycryptodome
+vanna
+openai
+google-generativeai
+chromadb
+lark-oapi
