@@ -85,12 +85,18 @@ def execute(message: str, chat_id: str, processor, **kwargs) -> dict:
         text_response, image_bytes = processor.chat_handler.generate_image_with_references(
             image_paths=image_paths,
             user_prompt=prompt,
-            use_pro=use_pro
+            use_pro=use_pro,
+            preserve_reference_resolution=(num_images == 1),
         )
         
         if image_bytes:
             suffix = "_pro_edited" if use_pro else "_edited"
-            result["image_path"] = processor._save_generated_image(image_bytes, chat_id, suffix)
+            result["image_path"] = processor._save_generated_image(
+                image_bytes,
+                chat_id,
+                suffix,
+                reference_image_path=image_paths[0] if num_images == 1 else None,
+            )
             if num_images > 1:
                 result["text"] = designer.get_image_edit_success() + " (基于多张图片)"
             else:

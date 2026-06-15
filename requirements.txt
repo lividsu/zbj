@@ -4,6 +4,7 @@ requests
 pycryptodome
 vanna
 openai
-google-generativeai
+google-genai
+Pillow
 chromadb
 lark-oapi

@@ -31,12 +31,18 @@ def execute(message: str, chat_id: str, processor, **kwargs) -> dict:
     text_response, image_bytes = processor.chat_handler.generate_image_with_references(
         image_paths=image_paths,
         user_prompt=prompt,
-        use_pro=use_pro
+        use_pro=use_pro,
+        preserve_reference_resolution=(len(image_paths) == 1),
     )
     
     if image_bytes:
         suffix = "_translate_pro" if use_pro else "_translate"
-        result["image_path"] = processor._save_generated_image(image_bytes, chat_id, suffix)
+        result["image_path"] = processor._save_generated_image(
+            image_bytes,
+            chat_id,
+            suffix,
+            reference_image_path=image_paths[0] if len(image_paths) == 1 else None,
+        )
         result["text"] = "语言转换已完成！(已保持原图风格和调性)"
         
         if current_attempt < processor.max_retry_attempts:

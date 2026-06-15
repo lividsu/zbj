@@ -8,6 +8,7 @@ from pathlib import Path
 from .chat_client import ChatHandler
 from core.skills_loader import SkillsLoader
 from core.tools import ToolRegistry, ExecuteSkillTool
+from core.image_utils import restore_source_dimensions
 
 class MessageProcessor:
     def __init__(self):
@@ -160,8 +161,26 @@ class MessageProcessor:
             temperature=0.9
         )
 
-    def _save_generated_image(self, image_bytes: bytes, chat_id: str, suffix: str = "") -> str:
+    def _save_generated_image(
+        self,
+        image_bytes: bytes,
+        chat_id: str,
+        suffix: str = "",
+        reference_image_path: str | None = None,
+    ) -> str:
         """保存生成的图片并返回路径"""
+        if reference_image_path:
+            image_bytes, target_size, generated_size = restore_source_dimensions(
+                image_bytes,
+                reference_image_path,
+            )
+            if generated_size != target_size:
+                print(
+                    "已恢复编辑图分辨率: "
+                    f"{generated_size[0]}x{generated_size[1]} -> "
+                    f"{target_size[0]}x{target_size[1]}"
+                )
+
         folder = os.path.join(os.getcwd(), "generated_images")
         os.makedirs(folder, exist_ok=True)
         filename = f"{chat_id}_{int(time.time())}{suffix}.png"

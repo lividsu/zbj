@@ -6,6 +6,11 @@ from openai import OpenAI
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+from core.image_utils import (
+    closest_supported_aspect_ratio,
+    get_display_size,
+    recommended_image_size,
+)
 
 
 class ChatHandler:
@@ -359,7 +364,8 @@ class ChatHandler:
         self,
         image_paths: Union[str, List[str]],
         user_prompt: str,
-        use_pro: bool = False
+        use_pro: bool = False,
+        preserve_reference_resolution: bool = False
     ) -> Tuple[str, Optional[bytes]]:
         """
         Generate a new image based on one or more reference images and text prompt.
@@ -394,6 +400,17 @@ class ChatHandler:
             
             model = self.image_gen_pro_model if use_pro else self.image_gen_model
             print(f"使用模型: {model}")
+
+            source_size = None
+            if preserve_reference_resolution and len(image_paths) == 1:
+                source_size = get_display_size(image_paths[0])
+                user_prompt = (
+                    f"{user_prompt}\n\n"
+                    "Strict editing constraint: keep the original canvas, framing, "
+                    f"aspect ratio, and pixel dimensions ({source_size[0]}x{source_size[1]}). "
+                    "Do not crop, extend, rotate, or resize the image. Change only the "
+                    "elements explicitly requested by the user."
+                )
             
             # Build contents: prompt first, then images
             # According to docs: contents=[prompt, image] for text-and-image-to-image
@@ -404,10 +421,33 @@ class ChatHandler:
                 contents.append(image_part)
                 print(f"已加载参考图片 {i+1}: {image_path}")
             
+            config = None
+            if source_size:
+                source_width, source_height = source_size
+                aspect_ratio = closest_supported_aspect_ratio(
+                    source_width,
+                    source_height,
+                    allow_extreme="3.1-flash-image" in model,
+                )
+                image_size = recommended_image_size(source_width, source_height)
+                config = types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
+                    image_config=types.ImageConfig(
+                        aspect_ratio=aspect_ratio,
+                        image_size=image_size,
+                    ),
+                )
+                print(
+                    "编辑图片输出约束: "
+                    f"原图={source_width}x{source_height}, "
+                    f"比例={aspect_ratio}, 模型尺寸={image_size}"
+                )
+
             # Generate with reference images
             response = self.client.models.generate_content(
                 model=model,
-                contents=contents
+                contents=contents,
+                config=config,
             )
             
             # Process response - may contain text and/or image
